@@ -1,0 +1,241 @@
+function probability_distribution_simulation()
+
+clc;
+clear;
+close all;
+
+%% -----------------------------
+% Parameters
+%% -----------------------------
+
+alpha = 0.5;
+beta  = 0.05;
+ATP   = 1.0;
+
+k1  = 0.5;
+k_1 = 0.1;
+k2  = 0.05;
+k_2 = 0.2;
+k3  = 0.3;
+k_3 = 0.05;
+
+t_end = 1000.0;
+
+%% -----------------------------
+% Deterministic system (find E*)
+%% -----------------------------
+
+% Step-by-step definition in chunks with 1-unit increments
+a = 1:1:500;          % First chunk: 1 to 500
+b = 501:1:2000;       % Second chunk: 501 to 2,000
+c = 2001:1:3500;
+d = 3501:1:5000;
+e = 5001:1:6500;
+f = 6501:1:8000;
+g = 8001:1:9500;
+h = 9501:1:11000;
+
+% Combine all chunks into a single array with step size of 1
+E_vals = unique([a, b, c, d, e, f, g, h]); 
+ratio  = zeros(size(E_vals));
+
+for i = 1:length(E_vals)
+
+    Etot = E_vals(i);
+    y0 = [0; Etot; 0; 0; 0];
+
+    sol = ode45(@(t,y) system(t,y,alpha,beta,ATP,k1,k_1,k2,k_2,k3,k_3), ...
+                [0 t_end], y0);
+
+    y_final = deval(sol, t_end);
+
+    S = y_final(1);
+    P = y_final(5);
+
+    ratio(i) = P/(P+S+1e-12);
+
+end
+
+y_min = min(ratio);
+y_max = max(ratio);
+y_mid = 0.5 * (y_min + y_max);
+
+[~, idx_star] = min(abs(ratio - y_mid));
+E_star = E_vals(idx_star);
+
+E0 = round(0.9 * E_star);
+E1 = round(1.1 * E_star);
+
+[~, idx0] = min(abs(E_vals - E0));
+[~, idx1] = min(abs(E_vals - E1));
+
+E0 = E_vals(idx0);
+E1 = E_vals(idx1);
+
+fprintf('E0, E*, E1 = %d, %d, %d\n', E0, E_star, E1);
+
+%% -----------------------------
+% Gillespie simulations
+%% -----------------------------
+
+N_runs = 10000;
+
+dist_E0 = zeros(N_runs,1);
+dist_E1 = zeros(N_runs,1);
+
+for i = 1:N_runs
+    dist_E0(i) = gillespie(E0, t_end, alpha,beta,ATP,k1,k_1,k2,k_2,k3,k_3);
+    dist_E1(i) = gillespie(E1, t_end, alpha,beta,ATP,k1,k_1,k2,k_2,k3,k_3);
+end
+
+%% -----------------------------
+% Save data
+%% -----------------------------
+
+save('probability_distribution_data.mat', ...
+     'E_vals', 'ratio', ...
+     'E0', 'E1', 'E_star', ...
+     'dist_E0', 'dist_E1');
+
+%% -----------------------------
+% Plot 1: Deterministic Midpoint Curve
+%% -----------------------------
+
+figure;
+scatter(E_vals, ratio, 15, 'k', 'filled');
+hold on;
+
+% Stagger vertical text labels to prevent visual overlap
+xline(E0, '--b', sprintf('E_0 (%d)', E0), 'LineWidth', 1.2, 'LabelVerticalAlignment', 'bottom');
+xline(E_star, '--r', sprintf('E^* (%d)', E_star), 'LineWidth', 1.2, 'LabelVerticalAlignment', 'middle');
+xline(E1, '--g', sprintf('E_1 (%d)', E1), 'LineWidth', 1.2, 'LabelVerticalAlignment', 'top');
+
+xlabel('Total enzyme concentration');
+ylabel('P / (P + S)');
+grid on;
+box on;
+
+%% -----------------------------
+% Plot 2: Probability Distributions
+%% -----------------------------
+
+figure;
+histogram(dist_E0, 50, 'Normalization','pdf', ...
+    'FaceAlpha',0.6, 'DisplayName',sprintf('E0=%d',E0));
+hold on;
+histogram(dist_E1, 50, 'Normalization','pdf', ...
+    'FaceAlpha',0.6, 'DisplayName',sprintf('E1=%d',E1));
+
+xlabel('P/(P+S)');
+ylabel('Probability density');
+legend;
+grid on;
+box on;
+
+end
+
+
+%% -----------------------------
+% ODE System
+%% -----------------------------
+
+function dydt = system(~, y, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3)
+
+S   = y(1);
+E   = max(y(2), 0.0);
+ET  = y(3);
+ETS = y(4);
+P   = y(5);
+
+dS   = alpha - k2*ET*S + k_2*ETS;
+dE   = -k1*ATP*E + k_1*ET + k3*ETS - k_3*E*P;
+dET  = k1*ATP*E - k_1*ET - k2*ET*S + k_2*ETS;
+dETS = k2*ET*S - (k_2 + k3)*ETS + k_3*E*P;
+dP   = k3*ETS - k_3*E*P - beta*P;
+
+dydt = [dS; dE; dET; dETS; dP];
+
+end
+
+
+%% -----------------------------
+% Gillespie SSA
+%% -----------------------------
+
+function value = gillespie(Etot, t_end, alpha,beta,ATP,k1,k_1,k2,k_2,k3,k_3)
+
+S  = 0;
+E  = Etot;
+ET = 0;
+ETS= 0;
+P  = 0;
+
+t = 0.0;
+
+while t < t_end
+
+    % Propensities
+    a = zeros(8,1);
+
+    a(1) = alpha;
+    a(2) = k1*ATP*E;
+    a(3) = k_1*ET;
+    a(4) = k2*ET*S;
+    a(5) = k_2*ETS;
+    a(6) = k3*ETS;
+    a(7) = k_3*E*P;
+    a(8) = beta*P;
+
+    a0 = sum(a);
+
+    if a0 <= 0
+        break;
+    end
+
+    r1 = rand;
+    r2 = rand;
+
+    tau = -log(r1)/a0;
+    t = t + tau;
+
+    c = cumsum(a);
+    rxn = find(c >= r2*a0, 1, 'first');
+
+    switch rxn
+        case 1
+            S = S + 1;
+        case 2
+            if E>0
+                E = E-1; ET = ET+1;
+            end
+        case 3
+            if ET>0
+                ET = ET-1; E = E+1;
+            end
+        case 4
+            if ET>0 && S>0
+                ET = ET-1; S = S-1; ETS = ETS+1;
+            end
+        case 5
+            if ETS>0
+                ETS = ETS-1; ET = ET+1; S = S+1;
+            end
+        case 6
+            if ETS>0
+                ETS = ETS-1; E = E+1; P = P+1;
+            end
+        case 7
+            if E>0 && P>0
+                E = E-1; P = P-1; ETS = ETS+1;
+            end
+        case 8
+            if P>0
+                P = P-1;
+            end
+    end
+
+end
+
+value = P/(P+S+1e-12);
+
+end

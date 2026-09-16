@@ -1,0 +1,333 @@
+function Results = Overallfinding3_4(N_runs)
+clc; close all;
+if nargin == 0
+    N_runs = 4000; 
+end
+
+fprintf('Running %d direct rate-constant simulations...\n', N_runs);
+
+%% ================= UPDATED PARAMETERS =================
+alpha = 0.5;   
+beta  = 0.05;  
+ATP   = 1.0;
+t_end = 1000.0;
+t_end_stoch = t_end;
+eps_val = 1e-15;
+N_trajectories = 3000; 
+max_steps = 100000;  
+
+%% ================= PREALLOCATE NEW RESULTS =================
+NewResults = struct('E_vals', cell(1, N_runs), 'ratio', cell(1, N_runs), ...
+                    'dist_E0', cell(1, N_runs), 'dist_E1', cell(1, N_runs), ...
+                    'k', cell(1, N_runs), 'E_star', cell(1, N_runs), ...
+                    'E0', cell(1, N_runs), 'E1', cell(1, N_runs), ...
+                    'phi_E0', cell(1, N_runs), 'phi_E1', cell(1, N_runs), ...
+                    'dmu_E0', cell(1, N_runs), 'dmu_E1', cell(1, N_runs), ...
+                    'dmu_prime_E0', cell(1, N_runs), 'dmu_prime_E1', cell(1, N_runs), ...
+                    'KL_pq', cell(1, N_runs), 'KL_qp', cell(1, N_runs), ...
+                    'Jnet_E0', cell(1, N_runs), 'Jnet_E1', cell(1, N_runs));
+
+%% ================= PARALLEL POOL SETUP =================
+currentPool = gcp('nocreate');
+if isempty(currentPool) || currentPool.NumWorkers < 20
+    if ~isempty(currentPool)
+        delete(currentPool); 
+    end
+    maxWorkers = feature('numcores');
+    parpool('local', maxWorkers);
+    currentPool = gcp();
+end
+fprintf('Parallel Pool active with %d workers.\n', currentPool.NumWorkers);
+pctRunOnAll warning('off', 'all');
+ode_opts = odeset('RelTol', 1e-5, 'AbsTol', 1e-7);
+
+parfor run = 1:N_runs
+    % Direct logarithmic sampling for k-vectors (range: 1e-2 to 1e2)
+    k_vec = 10.^(-2 + 4 * rand(1, 6));
+    k1  = k_vec(1); k_1 = k_vec(2);
+    k2  = k_vec(3); k_2 = k_vec(4);
+    k3  = k_vec(5); k_3 = k_vec(6);
+    
+    %% STEP 2: EXTENDED ODE SOLVE + MIDPOINT SEARCH (Up to 11000)
+    a = 1:50:500;          
+    b = 501:100:2000;       
+    c = 2001:150:3500;
+    d = 3501:200:5000;
+    e = 5001:250:6500;
+    f = 6501:300:8000;
+    g = 8001:350:9500;
+    h = 9501:400:11000;
+    E_vals = unique([a, b, c, d, e, f, g, h]);
+    
+    ratio_sample = zeros(size(E_vals));
+    for i = 1:length(E_vals)
+        Etot = E_vals(i);
+        y0 = [0.0; Etot; 0.0; 0.0; 0.0];
+        sol = ode15s(@(t,y) system_ode(t, y, alpha, beta, ATP, ...
+            k1, k_1, k2, k_2, k3, k_3), [0 t_end], y0, ode_opts);
+        y_final = sol.y(:, end);
+        S = y_final(1); P = y_final(5);
+        ratio_sample(i) = P / (P + S + eps_val);
+    end
+    ratio = ratio_sample;
+    
+    %% STEP 3: Midpoint E*
+    y_min = min(ratio);
+    y_max = max(ratio);
+    y_mid = 0.5 * (y_min + y_max);
+    [~, idx_star] = min(abs(ratio - y_mid));
+    E_star = E_vals(idx_star);
+    E0 = round(0.9 * E_star);   
+    E1 = round(1.1 * E_star);   
+    
+    NewResults(run).E_vals = E_vals;
+    NewResults(run).ratio  = ratio;
+    
+    %% STEP 4: VECTORIZED GILLESPIE SIMULATIONS
+    dist_E0_local = zeros(N_trajectories, 1);
+    dist_E1_local = zeros(N_trajectories, 1);
+    E0_mol = round(E0);   
+    E1_mol = round(E1);
+    
+    for i = 1:N_trajectories
+        dist_E0_local(i) = gillespie_vectorized(E0_mol, alpha, k1, k_1, k2, k_2, k3, k_3, beta, ATP, t_end_stoch, max_steps, eps_val);
+        dist_E1_local(i) = gillespie_vectorized(E1_mol, alpha, k1, k_1, k2, k_2, k3, k_3, beta, ATP, t_end_stoch, max_steps, eps_val);
+    end
+    
+    NewResults(run).dist_E0 = dist_E0_local;
+    NewResults(run).dist_E1 = dist_E1_local;
+    
+    %% STEP 5 & 6 & 8: Updated Entropy, dmu, dmu_prime, Jnet
+    NewResults(run).phi_E0 = compute_entropy_local(E0, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, eps_val, ode_opts);
+    NewResults(run).phi_E1 = compute_entropy_local(E1, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, eps_val, ode_opts);
+    
+    [dmu0, dmu_prime0] = compute_dmu_local(E0, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, eps_val, ode_opts);
+    [dmu1, dmu_prime1] = compute_dmu_local(E1, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, eps_val, ode_opts);
+    
+    NewResults(run).dmu_E0 = dmu0;
+    NewResults(run).dmu_E1 = dmu1;
+    NewResults(run).dmu_prime_E0 = dmu_prime0;
+    NewResults(run).dmu_prime_E1 = dmu_prime1;
+    
+    %% STEP 7: KL Divergence
+    d0 = dist_E0_local(:);
+    d1 = dist_E1_local(:);
+    all_d = [d0; d1];
+    min_val = min(all_d);
+    max_val = max(all_d);
+    range_val = max_val - min_val;
+    
+    if range_val < 1e-12
+        NewResults(run).KL_pq = 0;
+        NewResults(run).KL_qp = 0;
+    else
+        num_bins = 50;
+        if min_val > 0 && (max_val / (min_val + eps_val) > 10)
+            bins = logspace(log10(max(1e-10, min_val)), log10(max_val), num_bins);
+        else
+            bins = linspace(min_val, max_val, num_bins);
+        end
+        
+        p_counts = histcounts(d0, bins);
+        q_counts = histcounts(d1, bins);
+        eps_smooth = 1 / (N_trajectories * 10);
+        p = (p_counts + eps_smooth) / sum(p_counts + eps_smooth);
+        q = (q_counts + eps_smooth) / sum(q_counts + eps_smooth);
+        
+        NewResults(run).KL_pq = sum(p .* log(p ./ q));
+        NewResults(run).KL_qp = sum(q .* log(q ./ p));
+    end
+    
+    NewResults(run).Jnet_E0 = compute_Jnet_local(E0, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, ode_opts);
+    NewResults(run).Jnet_E1 = compute_Jnet_local(E1, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, ode_opts);
+    
+    NewResults(run).k      = [k1 k_1 k2 k_2 k3 k_3];
+    NewResults(run).E_star = E_star;
+    NewResults(run).E0     = E0;
+    NewResults(run).E1     = E1;
+    
+    if mod(run, 10) == 0 || run == N_runs
+        fprintf('Simulation %d / %d complete.\n', run, N_runs);
+    end
+end
+
+%% ================= FIXED MERGE & SAVE =================
+filepath = 'C:\Users\punit\Downloads\HPC\newmod.mat';
+if exist(filepath, 'file') && dir(filepath).bytes > 0
+    old_data = load(filepath);
+    fn = fieldnames(old_data);
+    old_R = old_data.(fn{1})(:)';
+    new_R = NewResults(:)';
+    
+    f_old = fieldnames(old_R);
+    f_new = fieldnames(new_R);
+    
+    missing_in_new = setdiff(f_old, f_new);
+    for i = 1:length(missing_in_new)
+        [new_R.(missing_in_new{i})] = deal([]);
+    end
+    
+    missing_in_old = setdiff(f_new, f_old);
+    for i = 1:length(missing_in_old)
+        [old_R.(missing_in_old{i})] = deal([]);
+    end
+    
+    new_R = orderfields(new_R, old_R);
+    Results = [old_R, new_R];
+else
+    Results = NewResults(:)';
+end
+
+save(filepath, 'Results', '-v7.3');
+assignin('base', 'Results', Results);
+fprintf('\n================ RUN COMPLETE ================\n');
+fprintf('Successfully completed %d simulations.\n', N_runs);
+fprintf('Merged dataset saved to workspace and newmod.mat (Total runs: %d).\n', length(Results));
+
+%% ================= AUTOMATED PLOTTING ROUTINE =================
+plot_chemical_potentials_vs_kl(Results);
+end
+
+%% ================= HELPER FUNCTIONS =================
+function Phi = compute_entropy_local(Etot, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, eps_val, ode_opts)
+    y0  = [0; Etot; 0; 0; 0];
+    sol = ode15s(@(t,y) system_ode(t, y, alpha, beta, ATP, ...
+        k1, k_1, k2, k_2, k3, k_3), [0 t_end], y0, ode_opts);
+    y   = sol.y(:, end);
+    S=y(1); E=max(y(2),0); ET=y(3); ETS=y(4); P=y(5);
+    
+    J1f = k1*ATP*E;   J1b = k_1*ET;
+    J2f = k2*ET*S;    J2b = k_2*ETS;
+    J3f = k3*ETS;     J3b = k_3*E*P;
+    
+    flux = [J1f J1b; J2f J2b; J3f J3b];
+    Phi  = 0;
+    
+    for jj = 1:3
+        Jf  = flux(jj,1) + eps_val;
+        Jb  = flux(jj,2) + eps_val;
+        Affinity = log(Jf / Jb);
+        Phi = Phi + (flux(jj,1) - flux(jj,2)) * Affinity;
+    end
+end
+
+function [dmu, dmu_prime] = compute_dmu_local(Etot, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, eps_val, ode_opts)
+    y0  = [0; Etot; 0; 0; 0];
+    sol = ode15s(@(t,y) system_ode(t, y, alpha, beta, ATP, ...
+        k1, k_1, k2, k_2, k3, k_3), [0 t_end], y0, ode_opts);
+    y   = sol.y(:, end);
+    S   = y(1); P = y(5);
+    
+    forward  = k1*ATP*k2*S*k3;
+    backward = k_1*k_2*k_3*P;
+    dmu      = log((forward + eps_val) / (backward + eps_val));
+    
+    dmu_prime = dmu + log((alpha + eps_val) / (beta*P + eps_val));
+end
+
+function Jnet = compute_Jnet_local(Etot, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3, t_end, ode_opts)
+    y0  = [0; Etot; 0; 0; 0];
+    sol = ode15s(@(t,y) system_ode(t, y, alpha, beta, ATP, ...
+        k1, k_1, k2, k_2, k3, k_3), [0 t_end], y0, ode_opts);
+    y   = sol.y(:, end);
+    E   = max(y(2),0); ETS = y(4); P = y(5);
+    
+    Jnet = k3*ETS - k_3*E*P;
+end
+
+function value = gillespie_vectorized(Etot_molecules, alpha, k1, k_1, k2, k_2, k3, k_3, beta, ATP, t_end_stoch, max_steps, eps_val)
+    S = 0; E = Etot_molecules; ET = 0; ETS = 0; P = 0;
+    t = 0; steps = 0;
+    
+    rand_idx = 5000;
+    r_mat = rand(2, 5000);
+    
+    while (t < t_end_stoch) && (steps < max_steps)
+        steps = steps + 1;
+        rand_idx = rand_idx + 1;
+        if rand_idx > 5000
+            r_mat = rand(2, 5000);
+            rand_idx = 1;
+        end
+        
+        a1 = alpha;
+        a2 = k1*ATP*E;
+        a3 = k_1*ET;
+        a4 = k2*ET*S;
+        a5 = k_2*ETS;
+        a6 = k3*ETS;
+        a7 = k_3*E*P;
+        a8 = beta*P;
+        
+        a0 = a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8;
+        if a0 <= 0, break, end
+        
+        t = t - log(r_mat(1, rand_idx)) / a0;
+        r_val = r_mat(2, rand_idx) * a0;
+        
+        if r_val < a1
+            S = S + 1;
+        elseif r_val < (a1 + a2)
+            if E > 0, E = E - 1; ET = ET + 1; end
+        elseif r_val < (a1 + a2 + a3)
+            if ET > 0, ET = ET - 1; E = E + 1; end
+        elseif r_val < (a1 + a2 + a3 + a4)
+            if ET > 0 && S > 0, ET = ET - 1; S = S - 1; ETS = ETS + 1; end
+        elseif r_val < (a1 + a2 + a3 + a4 + a5)
+            if ETS > 0, ETS = ETS - 1; ET = ET + 1; S = S + 1; end
+        elseif r_val < (a1 + a2 + a3 + a4 + a5 + a6)
+            if ETS > 0, ETS = ETS - 1; E = E + 1; P = P + 1; end
+        elseif r_val < (a1 + a2 + a3 + a4 + a5 + a6 + a7)
+            if E > 0 && P > 0, E = E - 1; P = P - 1; ETS = ETS + 1; end
+        else
+            if P > 0, P = P - 1; end
+        end
+    end
+    value = P / (P + S + eps_val);
+end
+
+function dydt = system_ode(~, y, alpha, beta, ATP, k1, k_1, k2, k_2, k3, k_3)
+    S   = y(1); E   = max(y(2),0); ET  = y(3); ETS = y(4); P   = y(5);
+    
+    dS   = alpha - k2*ET*S + k_2*ETS;
+    dE   = -k1*ATP*E + k_1*ET + k3*ETS - k_3*E*P;
+    dET  =  k1*ATP*E - k_1*ET - k2*ET*S + k_2*ETS;
+    dETS =  k2*ET*S - (k_2 + k3)*ETS + k_3*E*P;
+    dP   =  k3*ETS - k_3*E*P - beta*P;
+    
+    dydt = [dS; dE; dET; dETS; dP];
+end  
+
+%% ================= PLOTTING FUNCTION =================
+function plot_chemical_potentials_vs_kl(Results)
+    dmu0 = [Results.dmu_E0];
+    dmu1 = [Results.dmu_E1];
+    dmu_p0 = [Results.dmu_prime_E0];
+    dmu_p1 = [Results.dmu_prime_E1];
+    kl_qp = [Results.KL_qp];
+    kl_pq = [Results.KL_pq];
+    
+    figure('Color', 'w', 'Position', [100, 100, 1000, 700]);
+    
+    subplot(2,2,1);
+    scatter(dmu0, kl_qp, 15, 'b', 'filled');
+    xlabel('\Delta\mu_{E0}'); ylabel('KL_{qp}');
+    title('KL_{qp} vs \Delta\mu_{E0}'); grid on;
+    
+    subplot(2,2,2);
+    scatter(dmu1, kl_pq, 15, 'r', 'filled');
+    xlabel('\Delta\mu_{E1}'); ylabel('KL_{pq}');
+    title('KL_{pq} vs \Delta\mu_{E1}'); grid on;
+    
+    subplot(2,2,3);
+    scatter(dmu_p0, kl_qp, 15, 'm', 'filled');
+    xlabel('\Delta\mu''_{E0}'); ylabel('KL_{qp}');
+    title('KL_{qp} vs \Delta\mu''_{E0}'); grid on;
+    
+    subplot(2,2,4);
+    scatter(dmu_p1, kl_pq, 15, 'k', 'filled');
+    xlabel('\Delta\mu''_{E1}'); ylabel('KL_{pq}');
+    title('KL_{pq} vs \Delta\mu''_{E1}'); grid on;
+    
+    sgtitle('Chemical Potentials (\Delta\mu and \Delta\mu'') vs KL Divergence');
+end

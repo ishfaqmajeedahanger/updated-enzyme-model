@@ -1,0 +1,65 @@
+function kl_divergence_simulation()
+
+clc;
+clear;
+close all;
+
+%% ================= Load Data =================
+
+% Loads the saved probability distributions from Gillespie SSA
+load('probability_distribution_data.mat', ...
+    'dist_E0', 'dist_E1', 'E0', 'E1');
+
+%% ================= Histogram Binning =================
+
+all_data = [dist_E0; dist_E1];
+
+nbins = 40;
+bins = linspace(min(all_data), max(all_data), nbins);
+
+% Compute density histogram
+[p_hist, edges] = histcounts(dist_E0, bins, 'Normalization', 'pdf');
+[q_hist, ~]     = histcounts(dist_E1, bins, 'Normalization', 'pdf');
+
+% Convert probability density -> discrete probabilities per bin
+bin_width = edges(2) - edges(1);
+
+p = p_hist * bin_width;
+q = q_hist * bin_width;
+
+%% ================= KL Divergence Calculation =================
+
+% Epsilon smoothing to prevent log(0) or division by zero
+eps_val = 1e-12;
+
+p = p + eps_val;
+q = q + eps_val;
+
+% Re-normalize probabilities so sum(p) == 1 and sum(q) == 1
+p = p / sum(p);
+q = q / sum(q);
+
+% Relative 
+KL_pq = sum(p .* log(p ./ q));
+KL_qp = sum(q .* log(q ./ p));
+
+fprintf('KL(E0 || E1) [E0=%d || E1=%d] = %.6f\n', E0, E1, KL_pq);
+fprintf('KL(E1 || E0) [E1=%d || E0=%d] = %.6f\n', E1, E0, KL_qp);
+
+%% ================= Visualization =================
+
+centers = 0.5 * (edges(1:end-1) + edges(2:end));
+
+figure;
+plot(centers, p, '-b', 'LineWidth', 1.8, 'DisplayName', sprintf('P(E_0 = %d)', E0));
+hold on;
+plot(centers, q, '-g', 'LineWidth', 1.8, 'DisplayName', sprintf('Q(E_1 = %d)', E1));
+
+xlabel('P / (P + S)');
+ylabel('Probability');
+title(sprintf('Probability Distributions & KL Divergence (KL = %.4f)', KL_pq));
+legend('Location', 'best');
+grid on;
+box on;
+
+end

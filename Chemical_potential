@@ -1,0 +1,162 @@
+function chemical_potential_cycle()
+
+clc;
+clear;
+close all;
+
+%% ================= PARAMETERS =================
+
+alpha = 0.5;
+beta  = 0.05;
+ATP   = 1.0;
+
+k1  = 0.5;
+k_1 = 0.1;
+k2  = 0.05;
+k_2 = 0.2;
+k3  = 0.3;
+k_3 = 0.05;
+
+t_end = 1000.0;
+
+R = 8.314;
+T = 300.0;
+eps_val = 1e-12;
+
+%% ================= RANGE OF ENZYME (CHUNKS a-h) =================
+
+a = 1:1:500;          % First chunk: 1 to 500
+b = 501:1:2000;       % Second chunk: 501 to 2,000
+c = 2001:1:3500;
+d = 3501:1:5000;
+e = 5001:1:6500;
+f = 6501:1:8000;
+g = 8001:1:9500;
+h = 9501:1:11000;
+
+% Combine all chunks into a single array with step size of 1
+E_vals = unique([a, b, c, d, e, f, g, h]); 
+ratio  = zeros(size(E_vals));
+
+%% ================= FIND E0, E*, E1 =================
+
+for i = 1:length(E_vals)
+
+    Etot = E_vals(i);
+    y0 = [0; Etot; 0; 0; 0];
+
+    sol = ode45(@(t,y) system(t,y,alpha,beta,ATP,...
+                k1,k_1,k2,k_2,k3,k_3), [0 t_end], y0);
+
+    y_final = deval(sol, t_end);
+
+    S = y_final(1);
+    P = y_final(5);
+
+    ratio(i) = P/(P+S+eps_val);
+end
+
+y_min = min(ratio);
+y_max = max(ratio);
+y_mid = 0.5 * (y_min + y_max);
+
+[~, idx_star] = min(abs(ratio - y_mid));
+E_star = E_vals(idx_star);
+
+E0 = round(0.9 * E_star);
+E1 = round(1.1 * E_star);
+
+[~, idx0] = min(abs(E_vals - E0));
+[~, idx1] = min(abs(E_vals - E1));
+
+E0 = E_vals(idx0);
+E1 = E_vals(idx1);
+
+fprintf('E0 = %d, E* = %d, E1 = %d\n\n', E0, E_star, E1);
+
+%% ================= STEADY STATE VALUES =================
+
+ss_E0 = steady_state(E0);
+ss_E1 = steady_state(E1);
+
+%% ================= CHEMICAL POTENTIAL =================
+
+dmu_E0 = delta_mu_cycle(ss_E0);
+dmu_E1 = delta_mu_cycle(ss_E1);
+
+fprintf('Delta mu at E0 = %.6f J/mol\n', dmu_E0);
+fprintf('Delta mu at E1 = %.6f J/mol\n', dmu_E1);
+fprintf('Delta Delta mu (E1 - E0) = %.6f J/mol\n', dmu_E1 - dmu_E0);
+
+%% ================= SAVE DATA =================
+
+save('chemical_potential_data.mat', ...
+     'E_vals', 'ratio', 'E0', 'E_star', 'E1', ...
+     'dmu_E0', 'dmu_E1');
+
+%% ================= VISUALIZATION =================
+
+figure;
+scatter(E_vals, ratio, 15, 'k', 'filled');
+hold on;
+
+% Stagger vertical text labels to prevent visual overlap
+xline(E0, '--b', sprintf('E_0 (%d)', E0), 'LineWidth', 1.2, 'LabelVerticalAlignment', 'bottom');
+xline(E_star, '--r', sprintf('E^* (%d)', E_star), 'LineWidth', 1.2, 'LabelVerticalAlignment', 'middle');
+xline(E1, '--g', sprintf('E_1 (%d)', E1), 'LineWidth', 1.2, 'LabelVerticalAlignment', 'top');
+
+xlabel('Total enzyme concentration (\muM)');
+ylabel('P / (P + S)');
+title('Chemical Potential Cycle Midpoint Analysis');
+grid on;
+box on;
+
+%% ================= NESTED FUNCTIONS =================
+
+    function vals = steady_state(Etot)
+
+        y0 = [0; Etot; 0; 0; 0];
+
+        sol = ode45(@(t,y) system(t,y,alpha,beta,ATP,...
+                    k1,k_1,k2,k_2,k3,k_3), [0 t_end], y0);
+
+        y_final = deval(sol, t_end);
+
+        vals = y_final;   % [S, E, ET, ETS, P]
+    end
+
+
+    function dmu = delta_mu_cycle(vals)
+
+        S   = vals(1);
+        P   = vals(5);
+
+        forward  = k1*ATP * k2*S * k3;
+        backward = k_1 * k_2 * k_3 * P;
+
+        dmu = R*T * log((forward + eps_val)/(backward + eps_val));
+    end
+
+end
+
+
+%% ================= ODE SYSTEM =================
+
+function dydt = system(~, y, alpha, beta, ATP,...
+                        k1, k_1, k2, k_2, k3, k_3)
+
+S   = y(1);
+E   = max(y(2),0);
+ET  = y(3);
+ETS = y(4);
+P   = y(5);
+
+dS   = alpha - k2*ET*S + k_2*ETS;
+dE   = -k1*ATP*E + k_1*ET + k3*ETS - k_3*E*P;
+dET  = k1*ATP*E - k_1*ET - k2*ET*S + k_2*ETS;
+dETS = k2*ET*S - (k_2 + k3)*ETS + k_3*E*P;
+dP   = k3*ETS - k_3*E*P - beta*P;
+
+dydt = [dS; dE; dET; dETS; dP];
+
+end
